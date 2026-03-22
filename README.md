@@ -708,3 +708,7 @@ https://github.com/ChimeraMind/scryptgate
 
 **First published: March 22, 2026**  
 **Prior art established. The ground is claimed. Build on it.**
+
+© 2026 Steven Thompson — Original concept and architecture
+First published: March 22, 2026
+MIT License — attribution required
