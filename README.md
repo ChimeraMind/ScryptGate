@@ -1,5 +1,9 @@
 # ScryptGate
 
+© 2026 Steven Thompson — Original concept and architecture
+First published: March 22, 2026
+MIT License — attribution required
+
 Modern AI agent stacks face a fundamental security problem — request authentication,
 rate limiting, and model integrity verification are handled entirely in software.
 Software can be bypassed, spoofed, or overwhelmed. This project proposes and
