@@ -1,0 +1,643 @@
+# 🤖 LLM + ASIC — Reasoning and Enforcement Separation
+
+### A Hardware-Rooted AI Security Architecture Pattern
+
+> **Concepts document — part of the ScryptGate research framework**  
+> *An architectural pattern for giving standard LLMs access to dedicated  
+> cryptographic hardware as callable security tools — separating AI reasoning  
+> from hardware enforcement.*
+
+-----
+
+> **Prior Art Notice:** No existing published work on using cryptographic  
+> mining ASICs as callable LLM security tools was found at time of writing.  
+> This document establishes that record. First published: **March 22, 2026.**
+
+-----
+
+## The Core Idea
+
+The most powerful configuration is not running an LLM on hashing silicon.
+
+It is giving a standard LLM **access** to hashing silicon as a callable tool.
+
+```
+Current AI security model:
+    LLM reasons about security
+            ↓
+    Software enforces the decision
+            ↓
+    Software can be bypassed, spoofed, or compromised
+
+This architecture:
+    LLM reasons about security
+            ↓
+    Hardware enforces the decision
+            ↓
+    Hardware cannot be bypassed by software — ever
+```
+
+The LLM provides reasoning. The ASIC provides enforcement. Neither can do the other’s job. Together they produce **hardware-rooted AI security decisions** — a class of guarantee that software-only AI architectures architecturally cannot provide regardless of how well they are written.
+
+-----
+
+## Table of Contents
+
+- [Why This Matters](#why-this-matters)
+- [The Separation Principle](#the-separation-principle)
+- [How It Works — LLM Tool Use](#how-it-works--llm-tool-use)
+- [The Four Hardware Tools](#the-four-hardware-tools)
+- [Decision Flow Examples](#decision-flow-examples)
+- [Why Hardware Enforcement Changes Everything](#why-hardware-enforcement-changes-everything)
+- [This Is Not Running LLM On ASIC](#this-is-not-running-llm-on-asic)
+- [Hardware Agnosticism](#hardware-agnosticism)
+- [Security Properties](#security-properties)
+- [Implementation Pattern](#implementation-pattern)
+- [Comparison With Existing Approaches](#comparison-with-existing-approaches)
+- [Open Research Questions](#open-research-questions)
+- [Reference Implementation](#reference-implementation)
+
+-----
+
+## Why This Matters
+
+Modern AI agent systems reason about security but enforce decisions in software. This creates a fundamental gap:
+
+```
+AI agent decides: "This request looks suspicious — block it"
+            ↓
+Writes to an in-memory blocklist
+            ↓
+Blocklist lives in the same process space as the agent
+            ↓
+A sufficiently privileged attacker can modify the blocklist
+            ↓
+The AI's security decision is overruled by software
+```
+
+No matter how sophisticated the reasoning — if enforcement is software, enforcement can be bypassed by software.
+
+Hardware closes this gap permanently:
+
+```
+AI agent decides: "This request looks suspicious — block it"
+            ↓
+Calls hardware tool — ASIC enforces at silicon level
+            ↓
+No software process can override what silicon decided
+            ↓
+The AI's security decision is hardware-rooted
+```
+
+-----
+
+## The Separation Principle
+
+```
+┌─────────────────────────────────────────────────┐
+│                 REASONING LAYER                  │
+│                                                  │
+│   LLM (any model, any size, any architecture)   │
+│   LangChain / agent orchestration               │
+│   Context, history, threat intelligence         │
+│   Human-in-the-loop approval                    │
+│                                                  │
+│   "Should this action be allowed?"              │
+│   "Does this model look legitimate?"            │
+│   "Is this traffic pattern anomalous?"          │
+└──────────────────────┬──────────────────────────┘
+                       │ tool call
+                       ↓
+┌─────────────────────────────────────────────────┐
+│               ENFORCEMENT LAYER                  │
+│                                                  │
+│   Cryptographic ASIC (any algorithm)            │
+│   Hardware proof-of-work verification           │
+│   Hardware model integrity hashing              │
+│   Hardware rate limiting                        │
+│                                                  │
+│   "The answer is verified in silicon"           │
+│   "No software can override this result"        │
+│   "Fails closed if hardware unreachable"        │
+└─────────────────────────────────────────────────┘
+```
+
+The boundary between these two layers is the architectural innovation. Crossing that boundary with a tool call transforms a software security decision into a hardware-enforced one.
+
+-----
+
+## How It Works — LLM Tool Use
+
+Modern LLMs (via LangChain, LlamaIndex, or any tool-use framework) can call external tools as part of their reasoning chain. This is already well-established for web search, code execution, and API calls.
+
+This architecture adds **cryptographic hardware** to that tool registry.
+
+### Tool Registration (LangChain Example)
+
+```python
+from langchain.tools import tool
+import httpx
+
+SCRYPTGATE_URL = "http://YOUR_SCRYPTGATE_IP:8080"
+
+@tool
+def verify_request_pow(challenge: str, solution: str, difficulty: int) -> bool:
+    """
+    Verify a proof-of-work token using dedicated cryptographic hardware.
+    Use this tool before approving any agent action request.
+    Returns True only if the hardware verifies the token as valid.
+    Hardware verification cannot be spoofed — fails closed if unreachable.
+    """
+    try:
+        response = httpx.post(
+            f"{SCRYPTGATE_URL}/verify/pow",
+            json={
+                "challenge": challenge,
+                "solution": solution,
+                "difficulty": difficulty
+            },
+            timeout=5.0
+        )
+        return response.json().get("valid", False)
+    except Exception:
+        return False  # Hardware unreachable — fail closed always
+
+
+@tool
+def verify_model_integrity(model_path: str, expected_hash: str) -> bool:
+    """
+    Verify model weight integrity using dedicated cryptographic hardware.
+    Use this tool before loading any model into an inference environment.
+    The hardware hash is computed by an ASIC — cannot be faked in software.
+    Compare against expected_hash from the air-gapped vault reference.
+    """
+    try:
+        response = httpx.post(
+            f"{SCRYPTGATE_URL}/hash/model",
+            json={"model_path": model_path},
+            timeout=300.0
+        )
+        hardware_hash = response.json().get("hash")
+        return hardware_hash == expected_hash
+    except Exception:
+        return False
+
+
+@tool
+def get_hardware_entropy(bytes_needed: int = 32) -> str:
+    """
+    Get cryptographically strong entropy from dedicated hashing hardware.
+    Use this tool when generating keys, nonces, or any random values
+    that require hardware-quality entropy rather than software PRNG.
+    """
+    try:
+        response = httpx.get(
+            f"{SCRYPTGATE_URL}/entropy",
+            params={"bytes": bytes_needed},
+            timeout=5.0
+        )
+        return response.json().get("entropy_hex")
+    except Exception:
+        return None
+
+
+@tool
+def hardware_rate_check(source_id: str, action_type: str) -> dict:
+    """
+    Check if a source has exceeded hardware-enforced rate limits.
+    Hardware rate limiting cannot be reset by software — limits are
+    tracked in ASIC memory and reset only on hardware cycle.
+    Returns: {allowed: bool, remaining: int, reset_in_seconds: int}
+    """
+    try:
+        response = httpx.post(
+            f"{SCRYPTGATE_URL}/rate_check",
+            json={"source": source_id, "action": action_type},
+            timeout=5.0
+        )
+        return response.json()
+    except Exception:
+        return {"allowed": False, "remaining": 0, "reset_in_seconds": -1}
+
+
+# Register all hardware tools with the agent
+hardware_tools = [
+    verify_request_pow,
+    verify_model_integrity,
+    get_hardware_entropy,
+    hardware_rate_check,
+]
+```
+
+### Agent Initialization
+
+```python
+from langchain.agents import initialize_agent, AgentType
+from langchain.llms import Ollama
+
+llm = Ollama(model="llama3:8b")
+
+security_agent = initialize_agent(
+    tools=hardware_tools,
+    llm=llm,
+    agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+    handle_parsing_errors=True,
+    system_message="""
+    You are a security agent with access to dedicated cryptographic hardware.
+    
+    Before approving ANY agent action request you MUST call verify_request_pow.
+    Before loading ANY model you MUST call verify_model_integrity.
+    When generating ANY cryptographic material use get_hardware_entropy.
+    
+    The hardware tools fail closed — if they return False or None,
+    you must reject the request regardless of other context.
+    Hardware verification cannot be overridden.
+    
+    Your role is reasoning. The hardware's role is enforcement.
+    You decide IF something should proceed.
+    The hardware decides WHETHER it CAN proceed.
+    Both must agree for any action to execute.
+    """
+)
+```
+
+-----
+
+## The Four Hardware Tools
+
+### Tool 1 — verify_request_pow
+
+```
+Purpose:    Gate all agent action requests behind hardware PoW
+When used:  Before queuing any proposal for human review
+What it does:
+    → ASIC verifies Scrypt PoW at 185M/s
+    → Software cannot fake a valid token faster
+    → Invalid token = request rejected before LLM even sees it
+    → Valid token = LLM reasons about whether to approve
+
+LLM role:   "Should I approve this action?"
+ASIC role:  "Did this request actually do the work to get here?"
+```
+
+### Tool 2 — verify_model_integrity
+
+```
+Purpose:    Verify model weights before loading into inference
+When used:  Every time a model is loaded — no exceptions
+What it does:
+    → ASIC streams and hashes model weights
+    → Hash compared against vault-stored reference
+    → Vault is air-gapped — no network interface ever
+    → Mismatch = model does not load
+
+LLM role:   "Should I load this model for this task?"
+ASIC role:  "Are these weights what they claim to be?"
+```
+
+### Tool 3 — get_hardware_entropy
+
+```
+Purpose:    Hardware-quality randomness for cryptographic operations
+When used:  Key generation, nonce creation, token generation
+What it does:
+    → ASIC generates entropy from hardware hashing process
+    → Not software PRNG — actual hardware entropy source
+    → Software cannot predict or influence the output
+
+LLM role:   "I need a nonce for this operation"
+ASIC role:  "Here is entropy no software predicted"
+```
+
+### Tool 4 — hardware_rate_check
+
+```
+Purpose:    Rate limiting that software cannot reset or bypass
+When used:  Before processing repeated requests from same source
+What it does:
+    → Counters tracked in ASIC memory
+    → Cannot be reset by compromising the software stack
+    → Only resets on hardware power cycle
+
+LLM role:   "Is this source making too many requests?"
+ASIC role:  "Here is a count no software can falsify"
+```
+
+-----
+
+## Decision Flow Examples
+
+### Example 1 — Network Anomaly Response
+
+```
+Watchdog agent: "Unknown MAC address detected — 3 times in 60 seconds"
+        ↓
+LLM receives proposal
+        ↓
+LLM calls verify_request_pow(challenge, solution, difficulty)
+        ↓
+ASIC verifies → valid
+        ↓
+LLM calls hardware_rate_check("unknown_mac_alerts", "block_request")
+        ↓
+ASIC returns → {allowed: true, remaining: 4}
+        ↓
+LLM reasons:
+    "Three unknown MAC alerts in 60 seconds is anomalous.
+     PoW verified. Rate limit not exceeded.
+     Recommend: alert human, do not auto-block yet.
+     Confidence: medium — could be a new legitimate device."
+        ↓
+Human receives alert with LLM reasoning attached
+        ↓
+Human approves or denies with Ed25519 signature from vault
+        ↓
+If approved: watchdog executes, logs result
+```
+
+### Example 2 — Model Load Request
+
+```
+Inference request received for model "codellama-13b-q4"
+        ↓
+LLM receives load request
+        ↓
+LLM calls verify_model_integrity(
+    "/models/codellama-13b-q4.gguf",
+    vault_reference["codellama-13b-q4"]
+)
+        ↓
+ASIC streams 8GB model file, computes Scrypt hash
+        ↓
+Hash matches vault reference → True
+        ↓
+LLM reasons:
+    "Model integrity verified by hardware.
+     Hash matches vault reference.
+     Safe to proceed with inference."
+        ↓
+Model loads — inference proceeds
+        ↓
+If hash had NOT matched:
+    LLM reasons:
+        "Hardware integrity check failed.
+         Model weights do not match vault reference.
+         This model may have been tampered with.
+         Refusing to load. Alerting human immediately."
+    Model does not load — alert fires
+```
+
+### Example 3 — Key Generation
+
+```
+WireGuard peer rotation requested
+        ↓
+LLM determines new keypair needed
+        ↓
+LLM calls get_hardware_entropy(bytes_needed=64)
+        ↓
+ASIC returns 64 bytes of hardware entropy
+        ↓
+LLM uses entropy as seed for key generation
+        ↓
+Keys generated with hardware-quality randomness
+        ↓
+No software PRNG involved in the critical random step
+```
+
+-----
+
+## Why Hardware Enforcement Changes Everything
+
+### The Software Security Ceiling
+
+Every software security system has the same fundamental weakness:
+
+```
+Security check lives in software
+    → Runs in a process
+    → Process has a memory space
+    → Memory space can be read/written by privileged code
+    → Privileged code can modify or bypass the check
+    → Therefore: no software security check is absolute
+```
+
+This is not a flaw in any specific implementation. It is a property of software running on general-purpose hardware.
+
+### What Hardware Provides
+
+```
+Security check lives in silicon
+    → Runs on dedicated hardware
+    → Hardware has no general-purpose memory accessible to software
+    → No software process can modify what silicon decided
+    → Therefore: hardware security checks are absolute
+    → (Subject only to physical access attacks)
+```
+
+### The Combined Property
+
+When an LLM calls a hardware tool:
+
+```
+LLM provides:     Context, reasoning, nuance, adaptability
+                  "This LOOKS suspicious because..."
+                  "Given the history of this source..."
+                  "The risk level appears to be..."
+
+Hardware provides: Absolute enforcement, unfakeability
+                  "The PoW is valid or it is not"
+                  "The hash matches or it does not"
+                  "The rate limit is exceeded or it is not"
+```
+
+Neither layer alone is sufficient:
+
+- Hardware alone: enforces blindly, no reasoning about context
+- LLM alone: reasons well, enforces in software — bypassable
+
+Together: reasons about context, enforces in hardware — the ceiling of achievable security without dedicated HSMs costing thousands of dollars.
+
+-----
+
+## This Is Not Running LLM On ASIC
+
+This document describes a different concept from running neural network inference on hashing silicon (see <hash-native-ai.md>).
+
+```
+Running LLM ON ASIC:
+    → Neural network weights computed by hashing silicon
+    → Hash-native neural architecture
+    → Long-term research direction
+    → Requires new model architectures
+    → Hardware: KHeavyHash most promising near-term
+
+LLM USING ASIC as tool:
+    → Standard LLM (any model) calls hardware via tool API
+    → No changes to model architecture needed
+    → Implementable TODAY with existing hardware
+    → Hardware: any Scrypt/SHA256/Blake3 ASIC with controller access
+    → THIS DOCUMENT
+```
+
+Both concepts are worth pursuing. They are complementary, not competing. The tool-use pattern is achievable now. The native architecture is the longer horizon.
+
+-----
+
+## Hardware Agnosticism
+
+This pattern works with any cryptographic ASIC that can expose a local API. The specific algorithm determines which tools are most natural:
+
+|Algorithm |Most Natural Tool Application                            |
+|----------|---------------------------------------------------------|
+|Scrypt    |PoW gating (memory-hard = expensive to fake)             |
+|SHA-256   |Model integrity (Merkle tree verification)               |
+|Blake3    |High-throughput streaming hash (large model verification)|
+|KHeavyHash|PoW + rate limiting (SHA-3 core)                         |
+|Ethash    |Memory-hard verification (DAG properties)                |
+
+The LangChain tool interface is identical regardless of underlying algorithm. Swap the ASIC, update the tool implementation, the agent reasoning layer is unchanged.
+
+-----
+
+## Security Properties
+
+### What This Architecture Provides
+
+```
+1. Hardware-rooted request authentication
+   LLM cannot be tricked into approving a request
+   that hasn't cleared hardware PoW verification
+
+2. Hardware-rooted model integrity
+   LLM cannot reason about a model that hasn't
+   cleared hardware hash verification
+
+3. Hardware-quality entropy
+   LLM cannot generate weak keys because
+   entropy source is hardware not software PRNG
+
+4. Hardware-enforced rate limits
+   LLM cannot be overwhelmed by request floods
+   because hardware counters cannot be reset by software
+
+5. Fail-closed by design
+   If hardware is unreachable all tools return False/None
+   LLM system prompt instructs rejection on any hardware failure
+   No action proceeds without hardware confirmation
+```
+
+### What This Architecture Does Not Provide
+
+```
+1. Protection against physical ASIC compromise
+   Physical access to the ASIC breaks the model
+
+2. Protection if the LLM itself is compromised
+   A backdoored model could ignore tool results
+   Mitigated by: model integrity verification before load
+
+3. Absolute latency guarantees
+   Hardware round-trip adds milliseconds per tool call
+   Acceptable for security-critical paths
+
+4. Protection against quantum attacks
+   Scrypt and Ed25519 are not quantum-resistant
+   Post-quantum migration is a future concern
+```
+
+-----
+
+## Implementation Pattern
+
+### Minimal Viable Implementation
+
+```
+1. Any ASIC with local API access (see ScryptGate)
+2. Any LLM accessible via Ollama or API
+3. LangChain with tool registration (shown above)
+4. Four tool functions (shown above)
+5. System prompt instructing hardware-first verification
+
+That is the complete pattern.
+No special hardware beyond the ASIC.
+No special model architecture.
+No custom training.
+```
+
+### Production Hardening
+
+```
+1. mTLS between LLM server and ASIC API
+   → Prevent MITM on local network
+   
+2. Tool call logging to immutable append-only log
+   → Every hardware call recorded with timestamp
+   
+3. Hardware health monitoring
+   → Alert if ASIC unreachable before requests arrive
+   
+4. Tool result caching with TTL
+   → Don't re-verify the same PoW token twice
+   → Cache model hash for model load duration only
+   
+5. Separate tool execution process
+   → Tool calls run in isolated process
+   → Compromised tool cannot affect LLM process
+```
+
+-----
+
+## Comparison With Existing Approaches
+
+|Approach               |Reasoning     |Enforcement|Hardware-Rooted|Cost       |
+|-----------------------|--------------|-----------|---------------|-----------|
+|Software firewall rules|❌ Static rules|Software   |❌ No           |Low        |
+|LLM + software security|✅ Adaptive    |Software   |❌ No           |Medium     |
+|HSM + software logic   |❌ No reasoning|Hardware   |✅ Yes          |High ($$$) |
+|TPM + software logic   |❌ Limited     |Hardware   |✅ Yes          |Medium     |
+|**LLM + ASIC tools**   |✅ Adaptive    |Hardware   |✅ Yes          |**Low ($)**|
+
+The LLM + ASIC tool pattern is the only approach in this table that provides both adaptive reasoning AND hardware enforcement at consumer hardware cost.
+
+-----
+
+## Open Research Questions
+
+- What is the latency overhead of hardware tool calls in a full agent reasoning chain?
+- Can tool call results be cached safely without reducing security guarantees?
+- What system prompt patterns best enforce hardware-first verification behavior?
+- Can the pattern be generalized to TPMs and HSMs with the same tool interface?
+- Does hardware enforcement change LLM reasoning behavior — does the model reason differently knowing enforcement is hardware-rooted?
+- What is the minimum viable ASIC for this pattern — can a $15 FutureBit Apollo provide sufficient tool utility?
+- Can multiple ASICs be load-balanced behind a single tool interface for redundancy?
+
+-----
+
+## Reference Implementation
+
+The reference implementation of this pattern uses:
+
+- **ASIC:** Goldshell MiniDOGE 1 (Scrypt, 185 MH/s)
+- **LLM:** Ollama with Llama3 8B or CodeLlama 13B
+- **Orchestration:** LangChain with structured tool use
+- **Network:** Ghost homelab topology (see [concepts/ghost-homelab-architecture.md](ghost-homelab-architecture.md))
+- **Hardware API:** ScryptGate (see [README](../README.md))
+
+Full integration code is in `integration/langchain-plugin/` once implemented.
+
+-----
+
+## Related
+
+- [ScryptGate README](../README.md) — hardware API implementation
+- <ghost-homelab-architecture.md> — network topology
+- <hash-native-ai.md> — running LLM ON hashing silicon
+- [docs/security-analysis.md](../docs/security-analysis.md) — formal threat model
+
+-----
+
+*Part of the ScryptGate research framework*  
+*First published: March 22, 2026*  
+*Prior art established. The ground is claimed. Build on it.*
