@@ -1,0 +1,513 @@
+# 🔒 Security Analysis
+
+### Formal Threat Model for the ScryptGate Framework
+
+> **Documentation — part of the ScryptGate research framework**  
+> *Formal threat model, attack surface analysis, security properties,  
+> and honest assessment of what ScryptGate does and does not protect against.*
+
+-----
+
+## Table of Contents
+
+- [Scope](#scope)
+- [Assets Being Protected](#assets-being-protected)
+- [Trust Boundaries](#trust-boundaries)
+- [Threat Actors](#threat-actors)
+- [Attack Surface](#attack-surface)
+- [Threat Model — By Component](#threat-model--by-component)
+- [Security Properties — Formal](#security-properties--formal)
+- [Fail-Safe Analysis](#fail-safe-analysis)
+- [Known Weaknesses](#known-weaknesses)
+- [Cryptographic Primitive Analysis](#cryptographic-primitive-analysis)
+- [Comparison With Alternative Approaches](#comparison-with-alternative-approaches)
+- [Security Assumptions](#security-assumptions)
+- [Incident Response](#incident-response)
+- [Related](#related)
+
+-----
+
+## Scope
+
+This document covers the security properties of:
+
+1. **ScryptGate hardware checkpoint** — the ASIC and its local API
+1. **AI agent stack** — approval API, LangChain, inference worker
+1. **Network topology** — triple NAT ghost architecture
+1. **Human-in-the-loop approval flow** — signing and verification
+
+This document does not cover:
+
+- Physical security of the premises
+- ISP-level traffic analysis
+- Nation-state adversaries with physical access
+- Supply chain attacks on hardware
+
+-----
+
+## Assets Being Protected
+
+|Asset                                 |Value                                |Location                    |
+|--------------------------------------|-------------------------------------|----------------------------|
+|AI agent approval flow                |Critical — controls automated actions|MSI server                  |
+|Model weights                         |High — integrity of inference        |Encrypted volume            |
+|Private keys (SSH, WireGuard, Ed25519)|Critical                             |Qubes vault-qube, no network|
+|LUKS passphrase                       |Critical                             |Offline only, never digital |
+|Agent signing key                     |Critical                             |Qubes vault-qube            |
+|Network topology details              |Medium                               |Not published               |
+|Logs and audit trail                  |High                                 |MSI server, encrypted       |
+|Production website                    |Medium                               |Caddy, MSI server           |
+|Labs devices                          |High                                 |Behind triple NAT           |
+
+-----
+
+## Trust Boundaries
+
+```
+UNTRUSTED
+    ↓ (public internet)
+EDGE ROUTER                     ← Trust boundary 1
+    ↓ (NAT #1 — home subnet)
+MIDDLE ROUTER                   ← Trust boundary 2
+    ↓ (NAT #2 — middle subnet)
+SCRYPTGATE                      ← Hardware trust anchor
+SERVER                          ← Trust boundary 3
+    ↓ (NAT #3 / routing)
+LABS NETWORK                    ← Highest trust zone
+    ↓
+QUBES VAULT-QUBE                ← Absolute trust anchor
+                                   (no network interface — ever)
+```
+
+Nothing crosses a trust boundary without explicit permission. ScryptGate sits at boundary 3 as a hardware oracle — its results are treated as more trusted than any software component at the same layer.
+
+-----
+
+## Threat Actors
+
+### T1 — Remote Attacker (Internet)
+
+```
+Capabilities:
+    → Network access to public IP only
+    → Can probe port 443 and WireGuard UDP port
+    → Cannot reach any internal subnet directly
+    → May attempt to exploit public-facing services
+
+Motivation: opportunistic, targeted, or automated scanning
+```
+
+### T2 — Local Network Attacker (Home Network)
+
+```
+Capabilities:
+    → Access to home subnet (YOUR_HOME_SUBNET)
+    → Cannot reach middle subnet or labs
+    → Can attempt to reach edge router admin interface
+    → May be a compromised home device
+
+Motivation: lateral movement, credential theft
+```
+
+### T3 — Compromised Middle Router
+
+```
+Capabilities:
+    → Full control of middle subnet
+    → Can intercept traffic between edge and server
+    → Can send malicious proposals to approval API
+    → Cannot reach labs directly
+
+Motivation: pivot to server, inject malicious agent actions
+```
+
+### T4 — Compromised Server Process
+
+```
+Capabilities:
+    → Control of one or more Podman containers
+    → Can attempt to escape to host via SELinux bypass
+    → Can attempt to reach labs network
+    → Can attempt to call ScryptGate API maliciously
+
+Motivation: persistence, data exfiltration, lateral movement
+```
+
+### T5 — Physical Attacker
+
+```
+Capabilities:
+    → Physical access to any device
+    → Can attempt cold boot attacks on RAM
+    → Can attempt to read LUKS-encrypted drives
+    → Can steal ScryptGate ASIC
+
+Motivation: data theft, infrastructure takeover
+```
+
+-----
+
+## Attack Surface
+
+### External Attack Surface (Internet-Facing)
+
+```
+Port 443/TCP     → Caddy TLS → frontend/backend only
+                   Rate limited, security headers, TLS 1.3 only
+                   Backend not directly reachable
+
+WireGuard UDP    → Key-authenticated only
+                   No response to unauthenticated packets
+                   Effectively invisible to scanners
+```
+
+**Total external attack surface: two endpoints.**  
+Everything else is filtered at the edge router.
+
+### Internal Attack Surface (Per Trust Zone)
+
+```
+Home subnet:
+    → Edge router admin (HTTPS + SSH, key auth only)
+    → WireGuard server endpoint
+
+Middle subnet:
+    → Middle router LuCI (HTTPS, key auth, LAN only)
+    → Server wlan0 (no services exposed, uplink only)
+    → ScryptGate API (HTTP, local network only)
+
+Labs subnet:
+    → Server eth0 (gateway only, no admin services on this interface)
+    → Qubes workstation (SSH, key auth)
+    → Secondary device (SSH, key auth)
+
+Server internal:
+    → Caddy (443 only, proxies to containers)
+    → Approval API (8443, mTLS, restricted IPs only)
+    → Grafana (localhost:3000, WireGuard access only)
+    → Prometheus (localhost:9090, internal only)
+    → Chroma (container network only)
+    → Inference worker (container network only, mTLS)
+```
+
+-----
+
+## Threat Model — By Component
+
+### ScryptGate ASIC
+
+|Threat               |Attack                             |Mitigation                                              |Residual Risk             |
+|---------------------|-----------------------------------|--------------------------------------------------------|--------------------------|
+|API flooding         |Send thousands of verify requests  |Rate limiting on API                                    |Low                       |
+|MITM on local API    |Intercept verify calls             |mTLS on API endpoint                                    |Low                       |
+|Physical theft       |Remove ASIC from network           |Reference hashes in vault become orphaned — system halts|Low — system stops working|
+|Firmware tampering   |Flash malicious controller firmware|Verify controller firmware hash on boot                 |Medium — research ongoing |
+|Replay of valid token|Reuse a previously valid PoW token |Nonce ledger + timestamp window                         |Low                       |
+
+### Approval API
+
+|Threat                  |Attack                         |Mitigation                                   |Residual Risk|
+|------------------------|-------------------------------|---------------------------------------------|-------------|
+|Unauthenticated proposal|Send proposal without PoW      |ScryptGate verification required             |Low          |
+|Forged agent signature  |Send proposal with fake sig    |Ed25519 verification against known public key|Low          |
+|Replay attack           |Reuse old approved proposal    |Nonce + timestamp validation                 |Low          |
+|SQL injection           |Malicious proposal content     |Parameterized queries, input validation      |Low          |
+|Container escape        |Exploit container to reach host|SELinux enforcing, rootless Podman           |Medium       |
+|Admin key compromise    |Steal Ed25519 private key      |Key lives in vault-qube, no network          |Low          |
+
+### Inference Worker
+
+|Threat                        |Attack                     |Mitigation                                       |Residual Risk|
+|------------------------------|---------------------------|-------------------------------------------------|-------------|
+|Tampered model weights        |Replace model file         |ScryptGate integrity verification before load    |Low          |
+|Malicious model (supply chain)|Download backdoored model  |Verify against vault hash, use known-good sources|Medium       |
+|Resource exhaustion           |Flood inference requests   |Resource limits in Podman compose, rate limiting |Low          |
+|mTLS bypass                   |Connect without client cert|mTLS required, Caddy enforces                    |Low          |
+
+### Network Topology
+
+|Threat                  |Attack                                      |Mitigation                                             |Residual Risk|
+|------------------------|--------------------------------------------|-------------------------------------------------------|-------------|
+|Port scan               |Enumerate open ports                        |Only 443 and WireGuard visible externally              |Low          |
+|DDoS on public IP       |Flood port 443                              |Caddy rate limiting, edge router drops                 |Medium       |
+|Labs device escape      |Labs device tries to reach internet directly|Kill switch — only path is through server              |Low          |
+|Home device reaches labs|Home device scans labs subnet               |No route exists — structural isolation                 |Low          |
+|WireGuard key theft     |Steal peer private key                      |Key in vault-qube, revoke peer immediately if suspected|Medium       |
+|DNS spoofing            |Poison DNS cache                            |DNSSEC + DNS-over-TLS                                  |Low          |
+
+### Human-in-the-Loop Flow
+
+|Threat                |Attack                               |Mitigation                                               |Residual Risk|
+|----------------------|-------------------------------------|---------------------------------------------------------|-------------|
+|Admin impersonation   |Forge admin approval signature       |Ed25519 — unforgeable without private key                |Low          |
+|Social engineering    |Trick admin into approving bad action|LLM reasoning summary shown with every approval          |Medium       |
+|Admin key exfiltration|Steal key from vault-qube            |Vault has no network interface — physical access required|Low          |
+|Approval UI compromise|XSS/CSRF on approval web UI          |CSP headers, CSRF tokens, WireGuard-only access          |Low          |
+
+-----
+
+## Security Properties — Formal
+
+### Property 1 — Ghost Topology
+
+**Claim:** No inbound connection to labs subnet is possible from the internet without compromising at least two separate systems with independent credentials.
+
+**Proof sketch:**
+
+```
+Internet → edge router (NAT, no port forward to labs)
+         → middle router (NAT, no port forward to labs)
+         → server (routes labs traffic, no port forward to labs)
+         → labs devices (no public exposure)
+
+To reach labs from internet requires:
+    Compromise edge router AND
+    Compromise middle router AND
+    Compromise server
+    OR
+    Compromise server WireGuard key AND connect via VPN
+```
+
+**Holds unless:** All three are compromised simultaneously, or WireGuard key is stolen.
+
+### Property 2 — Kill Switch
+
+**Claim:** If the server’s uplink interface goes down, labs devices lose all internet connectivity with no possible bypass.
+
+**Proof sketch:**
+
+```
+Labs default route: server eth0 (YOUR_LABS_SUBNET.1)
+Server routes labs traffic: eth0 → wlan0 (nftables forward)
+If wlan0 down: forward rule exists but interface unavailable
+nftables default policy: DROP
+Labs traffic: dropped at kernel — no route to anywhere else
+```
+
+**Holds unless:** A secondary route is added to the routing table by a privileged process on the server.
+
+### Property 3 — Hardware-Rooted Request Verification
+
+**Claim:** No agent request can be approved without a valid proof-of-work token verified by the ASIC hardware. Software cannot produce valid tokens faster than the ASIC verifies them.
+
+**Proof sketch:**
+
+```
+Token difficulty set to require ~1M Scrypt operations
+ASIC verifies at 185M/s → verification is instant
+Software computes at ~50K/s → token production rate ~0.05/s
+At difficulty 20: attacker produces 1 valid token per 20 seconds
+ASIC verifies 185M tokens per second
+Asymmetry: 3,700,000:1 in favor of verifier
+```
+
+**Holds unless:** Attacker has access to equivalent Scrypt ASIC hardware.
+
+### Property 4 — Model Integrity
+
+**Claim:** A model with modified weights cannot be loaded into the inference environment without detection.
+
+**Proof sketch:**
+
+```
+Model load requires valid vault signature
+Vault computes expected hash from stored reference
+ASIC computes hash of actual model file
+If hashes differ: load rejected
+Vault reference: stored in vault-qube with no network interface
+Vault compromise: requires physical access to vault machine
+```
+
+**Holds unless:** Vault machine is physically compromised OR both model and vault reference are modified to match.
+
+### Property 5 — Admin Key Security
+
+**Claim:** The admin signing key cannot be exfiltrated remotely.
+
+**Proof sketch:**
+
+```
+Admin key stored in Qubes vault-qube
+vault-qube: no network interface configured — ever
+Exfiltration requires: network path that does not exist
+Remote compromise: impossible without a network interface to exploit
+```
+
+**Holds unless:** vault-qube is given a network interface (configuration error) or physical access is obtained.
+
+-----
+
+## Fail-Safe Analysis
+
+Every security component in this architecture is designed to fail **closed** — meaning failure results in more restriction, not less.
+
+|Component                 |Failure Mode                   |Fail Behavior              |Acceptable? |
+|--------------------------|-------------------------------|---------------------------|------------|
+|ScryptGate unreachable    |Network issue, hardware failure|All proposals rejected     |✅ Yes — safe|
+|ScryptGate returns invalid|Tampered hardware, bug         |Proposal rejected          |✅ Yes — safe|
+|Approval API down         |Container crash                |No approvals possible      |✅ Yes — safe|
+|Vault unreachable         |Qubes shutdown                 |Model load rejected        |✅ Yes — safe|
+|wlan0 down                |Wi-Fi drop, router reboot      |Labs go dark               |✅ Yes — safe|
+|WireGuard down            |Key mismatch, network          |Remote access lost         |✅ Yes — safe|
+|Caddy TLS error           |Cert expired, ACME fail        |Site unreachable           |✅ Yes — safe|
+|SELinux deny              |Container escape attempt       |Action blocked, logged     |✅ Yes — safe|
+|LUKS not mounted          |Reboot without unlock          |Podman stack fails to start|✅ Yes — safe|
+
+**No component in this architecture fails open.**
+
+-----
+
+## Known Weaknesses
+
+These are known limitations that are accepted as reasonable tradeoffs for a homelab context:
+
+### W1 — Single Point of Failure (Server)
+
+The server is the mandatory routing choke point. If it fails, labs lose internet. This is intentional for security but creates availability risk.
+
+**Mitigation:** UPS on server. Monitor uptime via Grafana. Document recovery procedure.
+
+### W2 — WireGuard Key on Server
+
+The server’s WireGuard private key is on the server filesystem (encrypted, but present). If the server is fully compromised the key could be extracted.
+
+**Mitigation:** LUKS encryption — key only accessible after boot unlock. Rotate WireGuard keys periodically.
+
+### W3 — DuckDNS Exposes Public IP
+
+The DuckDNS domain is publicly resolvable and points to your home public IP. This is a deliberate tradeoff for zero-subscription HTTPS.
+
+**Mitigation:** Cloudflare Tunnel (free tier) as future upgrade — hides public IP entirely.
+
+### W4 — ScryptGate Controller Research Incomplete
+
+Full ASIC compute redirection not yet achieved. Until controller research is complete, ScryptGate operates at reduced capability.
+
+**Mitigation:** Documented research pathway. Preliminary security via controller-level API.
+
+### W5 — Social Engineering Risk
+
+The human-in-the-loop approval is only as good as the human reviewing it. A sufficiently convincing malicious proposal could be approved.
+
+**Mitigation:** LLM reasoning summary displayed with every approval. Clear action descriptions. Anomaly flagging.
+
+-----
+
+## Cryptographic Primitive Analysis
+
+|Primitive                    |Used For                     |Strength|Quantum Resistance|Notes                              |
+|-----------------------------|-----------------------------|--------|------------------|-----------------------------------|
+|Scrypt (N=1M, r=8, p=1)      |PoW tokens, model hashing    |Strong  |No                |Memory-hard — ASIC-specific        |
+|WireGuard (ChaCha20-Poly1305)|VPN tunnels                  |Strong  |No                |256-bit equivalent security        |
+|TLS 1.3 (ECDHE-AES-256-GCM)  |HTTPS                        |Strong  |No                |Forward secrecy via ECDHE          |
+|mTLS (same as TLS 1.3)       |Service-to-service           |Strong  |No                |Mutual authentication              |
+|Ed25519                      |Agent signing, SSH, admin key|Strong  |No                |128-bit equivalent security        |
+|LUKS2 (AES-XTS-256)          |Disk encryption              |Strong  |Partial           |AES-256 has some quantum resistance|
+|rclone crypt (AES-256-CTR)   |Backup encryption            |Strong  |Partial           |                                   |
+|WPA3-SAE (AES-256-CCMP)      |Wi-Fi uplink                 |Strong  |No                |                                   |
+|DNSSEC                       |DNS integrity                |Strong  |No                |                                   |
+
+**Post-quantum note:** None of the asymmetric primitives (Ed25519, ECDHE) are quantum-resistant. This is acceptable for a homelab context in 2026 but should be monitored as post-quantum standards mature. NIST post-quantum standards (CRYSTALS-Kyber, CRYSTALS-Dilithium) are candidates for future migration.
+
+-----
+
+## Comparison With Alternative Approaches
+
+|Approach            |Ghost Topology|Hardware Auth|Model Integrity|Cost       |Complexity|
+|--------------------|--------------|-------------|---------------|-----------|----------|
+|Standard home router|❌             |❌            |❌              |Low        |Low       |
+|VPN only            |Partial       |❌            |❌              |Low-Medium |Low       |
+|pfSense/OPNsense    |Partial       |❌            |❌              |Medium     |Medium    |
+|Commercial HSM      |❌             |✅            |✅              |High ($$$) |High      |
+|TPM integration     |❌             |Partial      |Partial        |Low        |High      |
+|**ScryptGate stack**|**✅**         |**✅**        |**✅**          |**Low ($)**|**Medium**|
+
+ScryptGate is the only approach in this table providing all three properties at consumer hardware cost.
+
+-----
+
+## Security Assumptions
+
+This threat model assumes:
+
+```
+A1. The edge router firmware is not backdoored at manufacture
+A2. The middle router OpenWrt build is from official sources
+A3. The ASIC hardware has not been physically tampered with
+A4. The Qubes vault-qube never receives a network interface
+A5. The admin Ed25519 private key never leaves the vault-qube
+A6. The LUKS passphrase is not stored digitally anywhere
+A7. Physical access to the premises is controlled
+A8. The human reviewer does not approve obviously malicious proposals
+A9. Podman and the Linux kernel have no actively exploited zero-days
+A10. Scrypt, Ed25519, and AES-256 have no known practical breaks
+```
+
+If any assumption is violated the threat model may not hold. Assumptions A1-A3 and A7 require physical security measures outside the scope of this document.
+
+-----
+
+## Incident Response
+
+### Suspected Compromise — Middle Router
+
+```
+1. Disconnect middle router WAN from edge router immediately
+2. Labs go dark (kill switch activates automatically)
+3. Access edge router from home network — review logs
+4. Review MSI syslog for any proposals sent from middle router
+5. Review ScryptGate logs for unusual verification patterns
+6. Factory reset middle router — reflash OpenWrt from known good image
+7. Rotate middle router SSH keys and watchdog agent HMAC key
+8. Reconnect and monitor closely for 48 hours
+```
+
+### Suspected Compromise — Server Container
+
+```
+1. Identify which container via SELinux audit log
+2. Stop compromised container: podman stop <container>
+3. Do NOT delete — preserve for forensics
+4. Review container logs for exfiltration attempts
+5. Check if container attempted to reach labs subnet
+6. Rebuild container from clean image
+7. Review all other containers for lateral movement signs
+8. Rotate any credentials the compromised container had access to
+```
+
+### WireGuard Key Suspected Stolen
+
+```
+1. Immediately: ASUS GUI → VPN → WireGuard → delete affected peer
+2. Generate new keypair in vault-qube
+3. Add new public key as peer on ASUS
+4. Distribute new config to legitimate device
+5. Review WireGuard handshake logs for unauthorized connections
+6. If unauthorized connections found: audit what was accessed via VPN
+```
+
+### ScryptGate ASIC Stolen
+
+```
+1. Reference hashes in vault-qube become orphaned
+2. All model loads will fail — system halts safely
+3. No automated agent actions possible
+4. Human-only operation until replacement ASIC is acquired
+5. New ASIC: re-run model integrity baseline
+6. Update vault-qube reference hashes with new ASIC's hash output
+```
+
+-----
+
+## Related
+
+- [ScryptGate README](../README.md) — hardware implementation
+- [concepts/llm-asic-tool-use.md](../concepts/llm-asic-tool-use.md) — LLM tool use pattern
+- [concepts/ghost-homelab-architecture.md](../concepts/ghost-homelab-architecture.md) — network topology
+- [docs/hash-native-ai.md](hash-native-ai.md) — hash-native AI architecture
+
+-----
+
+*Part of the ScryptGate research framework*  
+*First published: March 22, 2026*  
+*Security is not a product. It is a process. This document is part of that process.*
