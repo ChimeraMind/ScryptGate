@@ -1,0 +1,420 @@
+# 🧠 Hash-Native AI Architecture
+
+### Neural Networks Designed Around Cryptographic Hashing Primitives
+
+> **Concepts document — part of the ScryptGate research framework**  
+> *A speculative but grounded research direction for neural network architectures  
+> built around operations that run natively on cryptographic hashing silicon.*
+
+-----
+
+> **Prior Art Notice:** No existing published work on neural network architectures  
+> designed around cryptographic hashing primitives was found at time of writing.  
+> This document establishes that record. First published: **March 22, 2026.**
+
+-----
+
+## Important Distinction
+
+This document describes **running a neural network ON hashing silicon** — designing model architectures around operations that hashing ASICs perform natively.
+
+This is different from **LLMs using ASICs as tools** (see [concepts/llm-asic-tool-use.md](../concepts/llm-asic-tool-use.md)), which uses standard model architectures with hardware tool calls.
+
+Both concepts are worth pursuing. They are complementary not competing.
+
+```
+Hash-native architecture  → long horizon, new model design
+LLM + ASIC tool use       → achievable now, existing models
+```
+
+-----
+
+## Table of Contents
+
+- [The Core Observation](#the-core-observation)
+- [Why Hashing Silicon Exists](#why-hashing-silicon-exists)
+- [The KHeavyHash Observation](#the-kheavyhash-observation)
+- [Hash-Native Neural Architecture — Concept](#hash-native-neural-architecture--concept)
+- [The Hardware-Rooted Output Property](#the-hardware-rooted-output-property)
+- [Candidate Hardware](#candidate-hardware)
+- [Mathematical Foundations](#mathematical-foundations)
+- [What This Would and Would Not Provide](#what-this-would-and-would-not-provide)
+- [Research Pathway](#research-pathway)
+- [Open Research Questions](#open-research-questions)
+- [Related](#related)
+
+-----
+
+## The Core Observation
+
+Current AI architectures are built around one fundamental operation:
+
+```
+Matrix multiplication
+    → Float32 / Float16 / Int8
+    → Runs on GPU tensor cores
+    → Hardware costs $200 — $10,000+
+    → Draws 150W — 700W
+    → Designed for this exact purpose
+```
+
+Cryptographic hashing silicon is built around different fundamental operations:
+
+```
+Hash function computation
+    → Fixed-size input → fixed-size output
+    → Runs on dedicated ASIC logic
+    → Hardware costs $15 — $500 used
+    → Draws 5W — 233W
+    → Designed for cryptographic proof-of-work
+```
+
+The question this document asks:
+
+**Is there a class of neural network architecture where the fundamental operations align with what hashing silicon does natively — making that silicon a viable inference platform?**
+
+This is not a rhetorical question. It is an open research question with a non-trivial answer.
+
+-----
+
+## Why Hashing Silicon Exists
+
+Mining ASICs exist because the market paid billions of dollars to build the most efficient possible implementations of specific mathematical functions. The result is silicon that performs those functions at a cost-per-operation orders of magnitude below what a GPU or CPU can achieve.
+
+```
+Scrypt on CPU:        ~50,000 H/s       at ~65W
+Scrypt on GPU:        ~10,000,000 H/s   at ~150W
+Scrypt on ASIC:       185,000,000 H/s   at ~233W
+
+Cost per hash:
+CPU:   0.0013 W per 1000 H/s
+GPU:   0.015  W per 1000 H/s
+ASIC:  0.0013 W per 1000 H/s  ← same efficiency as CPU but 3700x faster
+```
+
+That efficiency exists because the silicon does exactly one thing. The question is whether that one thing — or a close variant of it — is useful for AI inference.
+
+-----
+
+## The KHeavyHash Observation
+
+The most direct connection between hashing silicon and neural network operations exists in **KHeavyHash** — the algorithm used by Kaspa mining hardware.
+
+KHeavyHash is not a pure hash function. It combines:
+
+```
+KHeavyHash =
+    SHA-3 (Keccak) hashing
+    +
+    Matrix multiplication operations
+```
+
+Matrix multiplication is the fundamental operation in neural network inference. Silicon designed to run SHA-3 combined with matrix multiplication is not obviously different — at the level of primitive operations — from silicon designed to run small neural network layers.
+
+This is the most promising near-term research direction in this document.
+
+**The specific question:** Can Kaspa mining ASICs (e.g., Iceriver KS0, 100 GH/s, 65W) be used as neural network layer accelerators for architectures that use SHA-3 + matrix operations as their core compute primitive?
+
+Even for a narrow class of small models this would be a significant finding.
+
+-----
+
+## Hash-Native Neural Architecture — Concept
+
+### What a Standard Architecture Looks Like
+
+```
+Input
+    ↓ learned embedding (matrix multiply)
+Token representations
+    ↓ attention (matrix multiply + softmax)
+Contextualized representations
+    ↓ feed-forward (matrix multiply + activation)
+Output logits
+    ↓ softmax
+Probability distribution
+```
+
+Every arrow is a matrix multiplication. The hardware requirement is GPU tensor cores.
+
+### What a Hash-Native Architecture Could Look Like
+
+```
+Input
+    ↓ hash-based feature encoding
+      (fixed projection via hardware hash — deterministic, no learned weights)
+Hash-encoded features
+    ↓ LSH-based sparse attention
+      (hardware LSH finds relevant tokens — no full attention matrix needed)
+Sparse context set
+    ↓ hash-accumulator layers
+      (hash composition as learned transform — runs on ASIC natively)
+Accumulated representation
+    ↓ proof-of-work verified output
+      (output carries PoW token — verifiable computation provenance)
+Output with hardware attestation
+```
+
+### Key Differences
+
+|Property             |Standard Transformer|Hash-Native Architecture           |
+|---------------------|--------------------|-----------------------------------|
+|Core operation       |Matrix multiply     |Hash composition                   |
+|Hardware target      |GPU tensor cores    |Cryptographic ASIC                 |
+|Hardware cost        |$200–$10,000+       |$15–$500 used                      |
+|Power draw           |150–700W            |5–65W                              |
+|Output provenance    |None                |Cryptographic — hardware-verifiable|
+|Attention mechanism  |Full O(n²)          |Sparse LSH-based                   |
+|Weight representation|Float32/16          |Hash-space embeddings              |
+|Inference speed      |Fast on GPU         |Fast on ASIC for its operations    |
+|Portability          |GPU required        |Any compatible ASIC                |
+
+-----
+
+## The Hardware-Rooted Output Property
+
+This is the property that makes hash-native architecture uniquely interesting beyond just cost and power efficiency.
+
+A standard transformer produces an output. You can verify the output is reasonable. You cannot cryptographically prove which hardware produced it, when, or that the weights used were unmodified.
+
+A hash-native architecture running on a specific ASIC produces an output that includes:
+
+```
+{
+  "output": "the model's response",
+  "pow_token": {
+    "hardware_id": "asic_serial_or_pub_key",
+    "computation_hash": "hash_of_input_and_weights",
+    "timestamp": "unix_timestamp",
+    "nonce": "proof_of_work_solution"
+  }
+}
+```
+
+This token is:
+
+- **Unforgeable without the specific hardware** — another machine cannot produce a valid token
+- **Timestamped at hardware level** — not claimable after the fact
+- **Tied to specific weights** — proves which model version produced the output
+- **Verifiable by anyone** — public key verification, no trusted third party
+
+**What this enables:**
+
+```
+AI output provenance:
+    "This specific model version, running on this specific hardware,
+     produced this output at this timestamp"
+    → Cryptographically verifiable
+    → No trusted third party required
+    → Hardware-rooted — cannot be faked in software
+```
+
+This property does not exist in any current AI architecture. It may matter significantly in contexts requiring trusted AI outputs — legal, medical, financial, security-critical applications.
+
+-----
+
+## Candidate Hardware
+
+Hardware most likely to support hash-native neural operations, ranked by research priority:
+
+### Tier 1 — Most Promising
+
+**Iceriver KS0 — KHeavyHash — 100 GH/s — 65W**
+
+```
+Why: SHA-3 + matrix operations = closest to neural net primitives
+Cost: ~$60-100 used
+Power: 65W — lowest in class
+Research priority: Highest
+```
+
+**FutureBit Apollo LTC — Scrypt — 100 MH/s — 15W**
+
+```
+Why: 15W always-on — ideal for embedded inference
+     Most power-efficient Scrypt ASIC available
+Cost: ~$100-200
+Power: 15W — nearly idle power draw
+Research priority: High for embedded applications
+```
+
+### Tier 2 — Worth Investigating
+
+**Goldshell AL-BOX — Blake3 — 200 GH/s — 220W**
+
+```
+Why: Blake3 is tree-structured — natural for hierarchical models
+Cost: ~$100-150 used
+Research priority: Medium
+```
+
+**Goldshell KD-Box — Blake2S — 1.6 TH/s — 205W**
+
+```
+Why: Ultra-fast generic hashing — high throughput operations
+Cost: ~$80-120 used
+Research priority: Medium
+```
+
+### Tier 3 — Longer Term
+
+**Bitmain Antminer S19 — SHA-256 — 95 TH/s**
+
+```
+Why: Merkle tree operations — model provenance chains
+Power: 3250W — datacenter only
+Research priority: Low for homelab, medium for datacenter
+```
+
+-----
+
+## Mathematical Foundations
+
+### Hash Functions as Neural Primitives
+
+A hash function H maps input x to output H(x) with these properties:
+
+- Deterministic
+- Fixed output size
+- Avalanche effect (small input change → large output change)
+- One-way (cannot reverse)
+
+These properties have analogues in neural network operations:
+
+```
+Deterministic       → reproducible inference
+Fixed output size   → fixed-dimension embeddings
+Avalanche effect    → sensitive feature detection
+One-way             → information compression (encoder behavior)
+```
+
+### LSH as Sparse Attention
+
+Locality-Sensitive Hashing (LSH) finds similar items without comparing all pairs. Applied to attention:
+
+```
+Standard attention:   compare every token to every other token O(n²)
+LSH attention:        hash tokens into buckets, attend within buckets O(n log n)
+```
+
+Reformer (Kitaev et al., 2020) demonstrated LSH attention works for transformers. Hash-native architecture extends this — the LSH computation runs on dedicated hashing silicon rather than GPU.
+
+### Scrypt’s Salsa20/8 Core
+
+Scrypt’s internal mixing function uses Salsa20/8 — a stream cipher operating on 512-bit blocks with 8 rounds of ARX operations (Add, Rotate, XOR).
+
+ARX operations on fixed-size blocks have structural similarity to:
+
+- Attention mixing operations
+- Feed-forward layer operations
+- Normalization operations
+
+Whether this similarity is deep enough to support useful neural computation is the core mathematical question this research direction must answer.
+
+-----
+
+## What This Would and Would Not Provide
+
+### Would Provide
+
+```
+✅ Inference on hardware costing $15–500
+✅ Inference at 5–65W power draw
+✅ Hardware-rooted output provenance
+✅ Cryptographically verifiable computation
+✅ Inference without GPU dependency
+✅ Novel security properties for AI outputs
+```
+
+### Would Not Provide
+
+```
+❌ General-purpose intelligence at transformer scale
+   → Hash-native models would be narrow and task-specific initially
+
+❌ Equivalent performance to large transformers
+   → Different architecture = different capability profile
+
+❌ Drop-in replacement for existing models
+   → Requires new training methodology
+
+❌ Immediate practical implementation
+   → Requires significant research before working models exist
+```
+
+### The Honest Assessment
+
+This is speculative research. There is no proof yet that a hash-native neural architecture produces useful intelligence at any scale. The mathematical properties suggest it is worth investigating. Whether investigation produces a useful result is unknown.
+
+What is known:
+
+- The hardware exists and is cheap
+- The mathematical primitives have relevant properties
+- The output provenance property is novel and potentially valuable
+- Nobody has formally investigated this intersection
+
+That combination justifies the research investment.
+
+-----
+
+## Research Pathway
+
+```
+Phase 1 — Mathematical Analysis
+  └── Formal analysis of Scrypt/KHeavyHash as ML primitives
+  └── LSH collision properties for attention mechanisms
+  └── ARX operations as neural transforms
+  └── Output: mathematical feasibility assessment
+
+Phase 2 — Minimal Architecture Design
+  └── Design smallest possible hash-native layer
+  └── Implement in software simulation first
+  └── Train on simple classification task
+  └── Output: proof of concept — does it learn anything?
+
+Phase 3 — Hardware Validation
+  └── Implement Phase 2 on actual ASIC hardware
+  └── Measure throughput vs GPU baseline
+  └── Measure power efficiency
+  └── Output: hardware benchmark data
+
+Phase 4 — Provenance System
+  └── Implement hardware-rooted output tokens
+  └── Build verification system
+  └── Test in real application context
+  └── Output: working provenance demonstration
+
+Phase 5 — Scale Investigation
+  └── What is the largest useful hash-native model?
+  └── What tasks is it naturally suited for?
+  └── How does it compare to quantized small models?
+  └── Output: capability characterization
+```
+
+-----
+
+## Open Research Questions
+
+- Is Scrypt’s Salsa20/8 core expressive enough to learn useful representations?
+- What is the minimum model size that produces useful output on a narrow task?
+- Does KHeavyHash’s matrix operation component make it significantly more capable than pure hash functions for neural operations?
+- Can hash-native models be trained with standard backpropagation or do they require new training algorithms?
+- What is the relationship between hash function security properties and model robustness?
+- Can a hash-native model be adversarially attacked in the same ways as standard models?
+- What applications specifically benefit from hardware-rooted output provenance?
+- Can hash-native layers be combined with standard transformer layers in hybrid architectures?
+
+-----
+
+## Related
+
+- [ScryptGate README](../README.md) — hardware API and reference implementation
+- [concepts/llm-asic-tool-use.md](../concepts/llm-asic-tool-use.md) — LLMs using ASICs as tools (achievable now)
+- [concepts/ghost-homelab-architecture.md](../concepts/ghost-homelab-architecture.md) — network topology
+- [docs/security-analysis.md](security-analysis.md) — formal threat model
+
+-----
+
+*Part of the ScryptGate research framework*  
+*First published: March 22, 2026*  
+*Speculative but grounded. The hardware exists. The math is interesting. The question is open.*
