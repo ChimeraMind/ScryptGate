@@ -1,0 +1,721 @@
+# 👻 Ghost Homelab Architecture
+
+### Triple NAT Topology with Hardware Security Checkpoint and Zero-Subscription AI Stack
+
+> **Concepts document — part of the ScryptGate research framework**  
+> *A reproducible reference architecture for a fully self-hosted, layered-encrypted,  
+> ghost network with hardware-rooted AI agent security. Zero ongoing subscriptions.*
+
+-----
+
+## Overview
+
+This document describes a complete homelab network architecture built around three core properties:
+
+1. **Ghost topology** — Labs infrastructure is physically invisible to the internet and logically invisible to the home network. Three NAT layers with a mandatory software kill switch.
+2. **Hardware security checkpoint** — A repurposed cryptographic ASIC (see [ScryptGate](../README.md)) sits between the network edge and the AI inference stack. No automated action executes without hardware-verified proof-of-work.
+3. **Zero subscriptions** — Every component is self-hosted and free. WireGuard replaces commercial VPN. DuckDNS + Let’s Encrypt replaces paid TLS. Podman replaces Docker Desktop. Grafana + Prometheus replaces commercial monitoring.
+
+This architecture runs on consumer hardware available secondhand for under $500 total.
+
+-----
+
+## Table of Contents
+
+- [Topology](#topology)
+- [The Ghost Property](#the-ghost-property)
+- [Hardware Requirements](#hardware-requirements)
+- [Network Addressing](#network-addressing)
+- [Encryption Layer Map](#encryption-layer-map)
+- [Component Roles](#component-roles)
+- [The Kill Switch](#the-kill-switch)
+- [ScryptGate Integration](#scryptgate-integration)
+- [AI Agent Stack](#ai-agent-stack)
+- [Self-Hosted Services](#self-hosted-services)
+- [Zero Subscription Stack](#zero-subscription-stack)
+- [Security Properties](#security-properties)
+- [Threat Model](#threat-model)
+- [Replication Guide](#replication-guide)
+- [Future Upgrade Slots](#future-upgrade-slots)
+- [Variables Reference](#variables-reference)
+
+-----
+
+## Topology
+
+```
+INTERNET
+    ↓ (dynamic public IP — free DynDNS keeps domain pointed here)
+    ↓ (only port 443 and WireGuard UDP open inbound)
+
+[EDGE ROUTER]
+    ├── Home Wi-Fi SSID → personal devices
+    ├── YOUR_HOME_SUBNET/24 — simple DHCP
+    ├── WireGuard server → remote access from anywhere
+    ├── Skynet → IP blocklist, firewall hardening (Merlin)
+    ├── Diversion → DNS-level blocking (Merlin)
+    ├── DNS-over-TLS → encrypted DNS, ISP cannot see queries
+    └── One LAN port wired ↓
+
+[MIDDLE BUFFER ROUTER]
+    ├── WAN: wired from edge router
+    ├── YOUR_MIDDLE_SUBNET/24 — only the server lives here
+    ├── Hidden WPA3 SSID → server connects wirelessly as uplink
+    ├── banIP → automated threat IP blocking
+    ├── collectd → metrics forwarded to server
+    ├── Lua firewall rules → instant automated response
+    └── Python watchdog agent → lightweight sentinel
+
+        📶 Hidden WPA3-SAE SSID (MAC filtered — server only)
+        📶
+
+[SERVER — Headless Linux]
+    ├── wlan0: YOUR_MIDDLE_SUBNET.2 (uplink — middle router side)
+    ├── eth0: YOUR_LABS_SUBNET.1 (gateway — labs side)
+    ├── nftables: routes wlan0 ↔ eth0 with kill switch
+    ├── SELinux: enforcing
+    ├── LUKS2: encrypted sensitive volumes
+    │
+    ├── [ScryptGate Hardware Checkpoint]
+    │    └── Cryptographic ASIC on local network
+    │         ├── Hardware PoW verification for all agent requests
+    │         ├── Model integrity verification before inference
+    │         └── Hardware-accelerated vector search
+    │
+    └── Podman Stack:
+         ├── Caddy → HTTPS, auto TLS (Let's Encrypt + DynDNS)
+         ├── Frontend → production site
+         ├── FastAPI → backend API, internal only
+         ├── Approval API → human-in-loop, ScryptGate-gated
+         ├── LangChain → agent orchestration
+         ├── Inference worker → quantized LLM
+         ├── Chroma → vector DB, ScryptGate-accelerated
+         ├── Prometheus + Grafana → monitoring, Telegram alerts
+         └── rclone → nightly encrypted local backups
+    ↓ eth0
+
+[UNMANAGED SWITCH — YOUR_LABS_SUBNET/24]
+    ├── Labs Workstation → YOUR_LABS_SUBNET.10
+    │    ├── Maximum security OS (Qubes recommended)
+    │    ├── Air-gapped vault VM → ALL keys, NEVER networked
+    │    ├── GPU passthrough VMs → inference, compute
+    │    └── Disposable VMs → test untrusted code, dies after
+    │
+    └── Secondary Device → YOUR_LABS_SUBNET.11
+         └── SSH thin client, portable terminal
+```
+
+-----
+
+## The Ghost Property
+
+The Labs subnet is invisible in three distinct ways:
+
+### 1 — Invisible to the Internet
+
+```
+Internet sees:     YOUR_PUBLIC_IP:443 only
+Internet does not see:
+    → YOUR_MIDDLE_SUBNET (behind NAT #1)
+    → YOUR_LABS_SUBNET (behind NAT #2)
+    → Any device on Labs
+    → Any service on Labs
+    → The server itself
+```
+
+No inbound connection to Labs is possible from the internet. NAT without port forwards is not a firewall — it is a one-way door. Traffic flows out. Nothing gets in uninvited.
+
+### 2 — Invisible to the Home Network
+
+```
+Home devices see:   Edge router at YOUR_HOME_SUBNET.1 only
+Home does not see:
+    → Middle router (different subnet, no route advertised)
+    → Server (behind middle router NAT)
+    → Labs devices (behind server routing)
+```
+
+A phone on the home Wi-Fi cannot ping, scan, or reach any Labs device. They are on different subnets with no route between them.
+
+### 3 — Invisible Even to Each Other (Partially)
+
+```
+Labs Desktop sees:  Server at YOUR_LABS_SUBNET.1 (its gateway)
+Labs Desktop does not know:
+    → What is above the server
+    → That a middle router exists
+    → What subnet the server's uplink is on
+    → The edge router's existence
+```
+
+Each layer only knows its immediate neighbors.
+
+### The Kill Switch
+
+If the server’s wireless uplink to the middle router drops for any reason:
+
+```
+wlan0 goes down
+    ↓
+nftables forward chain has no matching rule for eth0 → anything else
+    ↓
+All Labs outbound traffic is dropped immediately
+    ↓
+Labs go completely dark
+    ↓
+No route exists — traffic cannot leak anywhere
+    ↓
+Human intervention required to restore
+```
+
+This is not a firewall rule. It is the absence of a route. Nothing can route around it.
+
+-----
+
+## Hardware Requirements
+
+This architecture is deliberately hardware-agnostic. Any devices filling these roles work. The reference implementation used consumer hardware under $500 total secondhand.
+
+### Role Requirements
+
+|Role         |Minimum Requirements                                  |Reference Implementation       |
+|-------------|------------------------------------------------------|-------------------------------|
+|Edge Router  |OpenWrt or DD-WRT/Merlin capable, WireGuard support   |ASUS GT-AX6000 (Merlin)        |
+|Middle Buffer|OpenWrt capable, Wi-Fi, 64MB+ RAM                     |Netgear R6120 (OpenWrt 25.12.1)|
+|Server       |Dual NIC or Wi-Fi + Ethernet, 8GB+ RAM, Linux         |MSI laptop, Fedora Server, LUKS|
+|Workstation  |16GB+ RAM for Qubes, IOMMU support for GPU passthrough|Desktop, Qubes OS              |
+|ScryptGate   |Any Scrypt ASIC with hackable controller              |Goldshell MiniDOGE 1           |
+|Switch       |Any unmanaged switch                                  |Any brand                      |
+
+### Why This Specific Topology
+
+```
+Edge Router (NAT #1)
+    → Handles public internet exposure
+    → Only device with a public IP
+    → WireGuard endpoint for remote access
+    → Home network lives here — isolated from everything below
+
+Middle Buffer (NAT #2)
+    → Adds a dedicated routing hop between edge and server
+    → Even if edge router is compromised, attacker hits this next
+    → Runs the lightweight security agent (low RAM requirement)
+    → Wi-Fi uplink to server = no physical port needed on server
+
+Server (NAT #3 / routing)
+    → The intelligence layer
+    → Routes Labs traffic — mandatory choke point
+    → All AI inference and agent logic lives here
+    → Kill switch is here — if server is off, Labs are dark
+
+Labs (behind server)
+    → Complete darkness from internet perspective
+    → Can only reach internet through server
+    → Server can log, inspect, or kill all their traffic
+```
+
+Every layer has exactly one job. No layer does two jobs.
+
+-----
+
+## Network Addressing
+
+Replace all values with your chosen subnets. The only requirement is that each subnet is non-overlapping.
+
+```
+YOUR_HOME_SUBNET     = 192.168.1.0/24    (edge router LAN)
+YOUR_MIDDLE_SUBNET   = 10.10.0.0/24      (middle router LAN)
+YOUR_LABS_SUBNET     = 10.20.0.0/24      (server LAN → labs)
+YOUR_VPN_SUBNET      = 10.66.66.0/24     (WireGuard tunnel)
+YOUR_SCRYPTGATE_IP   = 10.10.0.50        (ASIC controller)
+```
+
+### Device IP Assignments
+
+|Device           |IP                   |Notes                      |
+|-----------------|---------------------|---------------------------|
+|Edge router      |YOUR_HOME_SUBNET.1   |Gateway for home devices   |
+|Middle router WAN|YOUR_HOME_SUBNET.2   |Gets IP from edge router   |
+|Middle router LAN|YOUR_MIDDLE_SUBNET.1 |Gateway for server         |
+|Server wlan0     |YOUR_MIDDLE_SUBNET.2 |Uplink — middle router side|
+|Server eth0      |YOUR_LABS_SUBNET.1   |Gateway — labs side        |
+|ScryptGate       |YOUR_MIDDLE_SUBNET.50|ASIC controller, local API |
+|Labs workstation |YOUR_LABS_SUBNET.10  |Primary dev machine        |
+|Labs secondary   |YOUR_LABS_SUBNET.11  |Thin client                |
+|WireGuard server |YOUR_VPN_SUBNET.1    |On edge router             |
+|WireGuard clients|YOUR_VPN_SUBNET.10+  |One per device             |
+
+-----
+
+## Encryption Layer Map
+
+Every hop uses a different algorithm. No two adjacent layers share the same cryptographic primitive.
+
+|Hop              |Protocol       |Algorithm              |Where                         |
+|-----------------|---------------|-----------------------|------------------------------|
+|Wi-Fi uplink     |WPA3-SAE       |AES-256-CCMP           |Server ↔ Middle router        |
+|Remote VPN       |WireGuard      |ChaCha20-Poly1305      |Anywhere → Edge router        |
+|Public web       |TLS 1.3 (Caddy)|ECDHE-AES-256-GCM      |Internet → Server             |
+|Internal services|mTLS           |ECDHE-ChaCha20-Poly1305|Container ↔ container         |
+|Agent signing    |NaCl/libsodium |Ed25519                |Middle router → Approval API  |
+|ScryptGate PoW   |Scrypt         |N=1048576, r=8, p=1    |All agent requests            |
+|SSH everywhere   |OpenSSH        |Ed25519-AES-256-CTR    |All management                |
+|Disk volumes     |LUKS2          |AES-XTS-256            |Server sensitive data         |
+|Backups          |rclone crypt   |AES-256-CTR            |Server → local encrypted drive|
+|Qubes inter-VM   |Xen hypervisor |AES-128-GCM            |Workstation VM isolation      |
+
+No single algorithm compromise breaks more than one layer.
+
+-----
+
+## Component Roles
+
+### Edge Router — One Job
+
+```
+Accept inbound WireGuard (UDP YOUR_VPN_PORT)
+Accept inbound HTTPS (TCP 443) → forward to server
+NAT home devices to internet
+Run Skynet blocklist + Diversion DNS
+Hand out DHCP to home devices only
+Know nothing about what is below it except one LAN port
+```
+
+### Middle Router — One Job
+
+```
+Accept one WAN connection from edge router
+Provide one subnet (YOUR_MIDDLE_SUBNET) to server only
+Run lightweight watchdog agent
+Forward metrics and logs to server
+Know nothing about Labs or what is above edge router
+```
+
+### Server — The Choke Point
+
+```
+Route all Labs traffic (mandatory — no bypass possible)
+Run kill switch (wlan0 down = Labs dark)
+Run full AI agent stack
+Run production HTTPS site
+Receive and centralize all logs
+Be the only thing Labs devices know as their gateway
+```
+
+### ScryptGate — The Hardware Gate
+
+```
+Sit on YOUR_MIDDLE_SUBNET
+Expose three endpoints only
+Verify PoW on every agent request
+Hash model weights before inference loads
+Fail closed if unreachable
+See ScryptGate README for full documentation
+```
+
+-----
+
+## The Kill Switch
+
+The kill switch is implemented in `nftables` on the server. It is not a firewall rule — it is a routing architecture that makes leaks structurally impossible.
+
+```bash
+# /etc/nftables.d/homelab.nft
+
+table inet homelab {
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Allow established/related back to Labs
+        ct state established,related accept
+
+        # Labs → Internet via wlan0 ONLY
+        # If wlan0 is down this rule never matches
+        # Labs traffic drops — no other path exists
+        iifname "eth0" oifname "wlan0" accept
+
+        # Return traffic to Labs
+        iifname "wlan0" oifname "eth0" ct state established,related accept
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority 100;
+        # Masquerade Labs traffic as server's IP
+        iifname "eth0" oifname "wlan0" masquerade
+    }
+}
+```
+
+**Why this is a kill switch and not just a firewall rule:**
+
+A firewall rule can be bypassed by a sufficiently privileged process. A missing route cannot. When `wlan0` goes down:
+
+```
+eth0 → wlan0 forward rule exists but interface is down
+    → rule never matches
+    → default policy is DROP
+    → Labs traffic is dropped at the kernel level
+    → No process, no privilege escalation, no container escape
+      can create a route that doesn't exist
+```
+
+-----
+
+## ScryptGate Integration
+
+The ScryptGate hardware checkpoint sits on `YOUR_MIDDLE_SUBNET` alongside the server’s uplink interface.
+
+```
+Middle router agent detects anomaly
+    ↓
+Generates proposal with Scrypt PoW token
+    ↓
+POST to server approval API
+    ↓
+Server calls ScryptGate /verify/pow before queuing
+    ↓
+ASIC verifies at hardware speed
+    ↓
+Valid → enters human review queue
+Invalid → rejected, logged, alert sent
+    ↓
+Human approves via HTTPS UI (WireGuard access only)
+    ↓
+Admin signs approval with Ed25519 key from vault
+    ↓
+Middle router agent executes — logs result
+```
+
+For full ScryptGate documentation see the [project README](../README.md).
+
+-----
+
+## AI Agent Stack
+
+The agent stack is split across two devices by hardware necessity:
+
+### Middle Router — Eyes and Hands (Lightweight)
+
+```
+Fits in ~15MB RAM — designed for 64MB total RAM devices
+
+├── collectd           → CPU, memory, network, interface metrics
+├── banIP              → automated threat IP blocklist enforcement
+├── Lua firewall rules → instant sub-100ms automated response
+├── Python watchdog    → monitors connectivity, DNS, unknown MACs
+└── Proposal signer    → signs proposals with Ed25519, sends to server
+```
+
+**The middle router never acts without a server-signed approval.**  
+**The middle router never runs inference.**  
+**The middle router’s only autonomous actions are:**
+
+- Send metrics
+- Forward logs
+- Sign and send proposals
+- Execute pre-approved low-risk actions (restart a service)
+
+### Server — Brain (Full Stack)
+
+```
+├── LangChain          → orchestration, reasoning about proposals
+├── Inference worker   → quantized LLM, processes proposals
+├── Chroma             → vector DB, stores network event history
+├── Approval API       → receives proposals, gates on ScryptGate PoW
+├── Human review UI    → admin approves/denies via HTTPS
+└── Grafana            → visibility into everything
+```
+
+### Human-in-the-Loop Flow
+
+```
+[Middle Router]     [ScryptGate]    [Server]         [Human]
+     │                   │              │                │
+     │ detects anomaly    │              │                │
+     │ signs proposal     │              │                │
+     ├──── POST ─────────────────────► │                │
+     │                   │              │ verify PoW     │
+     │                   │◄─── call ───┤                │
+     │                   ├──── valid ──►│                │
+     │                   │              │ LangChain      │
+     │                   │              │ reasons        │
+     │                   │              │ queues         │
+     │                   │              ├──── alert ────►│
+     │                   │              │                │ reviews
+     │                   │              │◄─── sign ─────┤
+     │                   │              │ returns        │
+     │◄──────────────────────────────── │ approval       │
+     │ verifies admin sig │              │                │
+     │ executes action    │              │                │
+     │ logs result ──────────────────── ►│                │
+```
+
+No automated action without:
+
+1. Hardware PoW verification (ScryptGate)
+2. LLM reasoning about the proposal
+3. Human admin signature from air-gapped vault
+
+-----
+
+## Self-Hosted Services
+
+### Production HTTPS Site
+
+```
+DuckDNS (free) → points your-domain.duckdns.org to YOUR_PUBLIC_IP
+Caddy (free)   → handles TLS via Let's Encrypt DNS challenge
+                  auto-renews, zero maintenance
+                  serves frontend + proxies to backend API
+
+No paid domain required.
+No paid TLS certificate required.
+No CDN required.
+```
+
+### Remote Access VPN
+
+```
+WireGuard on edge router (built into Merlin firmware)
+    → Free, zero subscription
+    → Each device gets a keypair
+    → Split tunnel — only home/lab traffic routed
+    → Phone, laptop, anywhere → connect and reach Labs
+```
+
+### Monitoring
+
+```
+Prometheus + Grafana (Docker/Podman official images)
+    → Free, self-hosted
+    → Telegram bot for alerts (free)
+    → No Grafana Cloud account needed
+    → No PagerDuty, no OpsGenie, no subscription
+```
+
+### Backups
+
+```
+rclone with local encryption
+    → Backs up to local encrypted drive
+    → Or any S3-compatible storage you own
+    → AES-256 client-side encryption
+    → 30-day retention, nightly schedule
+    → Zero subscription
+```
+
+-----
+
+## Zero Subscription Stack
+
+|Need             |Solution                     |Monthly Cost|
+|-----------------|-----------------------------|------------|
+|Domain           |DuckDNS subdomain            |$0          |
+|TLS certificates |Let’s Encrypt via Caddy      |$0          |
+|VPN              |WireGuard (built into router)|$0          |
+|DNS blocking     |Diversion on Merlin          |$0          |
+|IP blocklists    |Skynet + banIP               |$0          |
+|Monitoring       |Prometheus + Grafana         |$0          |
+|Alerting         |Telegram bot                 |$0          |
+|Inference        |Ollama + quantized models    |$0          |
+|Vector DB        |Chroma self-hosted           |$0          |
+|Backups          |rclone local encrypted       |$0          |
+|Container runtime|Podman (Fedora native)       |$0          |
+|**Total**        |**Everything**               |**$0**      |
+
+Only ongoing cost is ISP service.
+
+-----
+
+## Security Properties
+
+### What This Architecture Guarantees
+
+```
+1. No inbound path to Labs exists
+   → Triple NAT with no port forwards to Labs
+   → Verified by external port scan
+
+2. Home network has zero visibility into Labs
+   → Different subnets with no advertised routes
+   → Verified by ping test from home devices
+
+3. Labs go dark if server goes offline
+   → Kill switch is structural — not a rule
+   → Verified by taking server offline
+
+4. All agent actions require hardware verification
+   → ScryptGate PoW on every proposal
+   → Fails closed if ASIC unreachable
+
+5. All agent actions require human approval
+   → No automated execution without admin signature
+   → Admin key lives in air-gapped vault
+
+6. All sensitive data is encrypted at rest
+   → LUKS2 on server volumes
+   → Passphrase required on every boot
+
+7. All management access requires cryptographic keys
+   → SSH Ed25519 keys everywhere
+   → Password authentication disabled everywhere
+
+8. DNS queries are encrypted
+   → DNS-over-TLS to upstream resolvers
+   → ISP cannot observe domain queries
+```
+
+### What This Architecture Does Not Guarantee
+
+```
+1. Protection if the edge router is physically compromised
+   → Physical access to any device breaks the model
+
+2. Protection against ISP-level traffic analysis
+   → They can see encrypted traffic volume and timing
+   → DNS-over-TLS hides queries but not connection patterns
+
+3. Zero-day exploits in any component
+   → Regular updates are required (documented in main guide)
+
+4. Protection if your WireGuard private key is stolen
+   → Key rotation procedure is documented
+
+5. Anonymity
+   → This is a security architecture, not an anonymity architecture
+   → Your public IP is attached to your DuckDNS domain
+```
+
+-----
+
+## Threat Model
+
+|Threat                        |This Architecture’s Response                                   |
+|------------------------------|---------------------------------------------------------------|
+|Internet port scan            |Only 443 visible — everything else filtered                    |
+|DDoS on public IP             |Caddy rate limiting — edge router absorbs                      |
+|Attacker reaches edge router  |Middle router is next — different credentials, different subnet|
+|Attacker reaches middle router|Server is next — different credentials, kill switch available  |
+|Attacker on home network      |No route to Labs — structural isolation                        |
+|Malicious agent action        |ScryptGate PoW + human approval required                       |
+|Tampered inference model      |ScryptGate model integrity verification                        |
+|SSH brute force               |fail2ban + key-only auth + non-standard ports                  |
+|DNS spoofing                  |DNSSEC + DNS-over-TLS                                          |
+|Compromised container         |SELinux enforcing — cannot escape to host                      |
+|Disk theft                    |LUKS2 — useless without passphrase                             |
+|WireGuard key theft           |Revoke peer on edge router — immediate                         |
+
+-----
+
+## Replication Guide
+
+To replicate this architecture on different hardware:
+
+### Step 1 — Choose Your Devices
+
+Fill these four roles with any compatible hardware:
+
+- Edge router running OpenWrt, DD-WRT, or Merlin
+- Middle buffer running OpenWrt (64MB RAM minimum)
+- Server running Linux with Wi-Fi and Ethernet
+- Workstation (Qubes OS recommended, 16GB+ RAM)
+
+### Step 2 — Choose Your Subnets
+
+Pick four non-overlapping subnets and fill in the [variables reference](#variables-reference) at the bottom of this document.
+
+### Step 3 — Follow Build Order
+
+```
+1. Configure edge router first
+   → WAN working, home DHCP working, WireGuard server up
+
+2. Configure middle router
+   → WAN from edge, LAN subnet, hidden SSID, banIP
+
+3. Configure server
+   → Connect to hidden SSID as uplink
+   → Configure eth0 as Labs gateway
+   → nftables kill switch
+   → Podman stack
+
+4. Configure ScryptGate
+   → Controller board access
+   → Local API running
+   → Integrated with approval API
+
+5. Configure workstation
+   → Connect to Labs switch
+   → vault-qube with no network
+   → GPU passthrough
+
+6. Verify
+   → Run all tests in Section A of the Security Addendum
+   → External port scan
+   → Kill switch test
+   → WireGuard remote access
+```
+
+### Step 4 — Harden
+
+Follow the Security Addendum for:
+
+- DNS security
+- IDS layer
+- Grafana alerting
+- Qubes firewall rules
+
+-----
+
+## Future Upgrade Slots
+
+These slot in without changing the architecture:
+
+|Upgrade                 |Benefit                                                  |When                         |
+|------------------------|---------------------------------------------------------|-----------------------------|
+|Wired server uplink     |Replace Wi-Fi with USB-C ethernet — more stable          |USB-C adapter available      |
+|Better middle router    |More RAM = richer agent stack on middle layer            |AmpliFi HD cracked or similar|
+|Cloudflare Tunnel (free)|Hide public IP from DuckDNS domain                       |Anytime                      |
+|Second server NIC       |Cleaner routing — no Wi-Fi dependency                    |Hardware available           |
+|Tang/Clevis LUKS unlock |Server unlocks LUKS via local Tang server on boot        |After stable                 |
+|Immutable server OS     |Replace Fedora Server with CoreOS — auto-updating, atomic|Mature installation          |
+|Multi-ASIC ScryptGate   |Higher PoW throughput, redundancy                        |More ASICs available         |
+
+-----
+
+## Variables Reference
+
+When adapting this architecture fill in all variables consistently:
+
+```
+YOUR_HOME_SUBNET         = ___.___.___. 0/24
+YOUR_MIDDLE_SUBNET       = ___.___.___. 0/24
+YOUR_LABS_SUBNET         = ___.___.___. 0/24
+YOUR_VPN_SUBNET          = ___.___.___. 0/24
+YOUR_PUBLIC_IP           = (dynamic — handled by DynDNS)
+YOUR_DYNDNS_DOMAIN       = yourname.duckdns.org
+YOUR_VPN_PORT            = 51820 (or any high UDP port)
+YOUR_SSH_PORT_EDGE       = 2222
+YOUR_SSH_PORT_MIDDLE     = 2223
+YOUR_SSH_PORT_SERVER     = 2224
+YOUR_SSH_PORT_WORKSTATION= 2225
+YOUR_SCRYPTGATE_IP       = YOUR_MIDDLE_SUBNET.50
+YOUR_SERVER_WLAN_IP      = YOUR_MIDDLE_SUBNET.2
+YOUR_SERVER_ETH_IP       = YOUR_LABS_SUBNET.1
+YOUR_WORKSTATION_IP      = YOUR_LABS_SUBNET.10
+YOUR_SECONDARY_IP        = YOUR_LABS_SUBNET.11
+```
+
+-----
+
+## Related
+
+- [ScryptGate README](../README.md) — hardware security checkpoint detail
+- [ScryptGate PDF](../ScryptGate.pdf) — full research document
+- Security Addendum — verification procedures, IDS, DNS security, alerting
+
+-----
+
+*Part of the ScryptGate research framework*  
+*First published: March 22, 2026*  
+*Zero subscriptions. Self-hosted everything. Ghost Labs.*
