@@ -1,4 +1,4 @@
-A P2P AI Network built on repurposed "e-waste" is the ultimate middle finger to the centralized GPU monopoly. By cutting out the "Pool Master," you’re turning every MiniDOGE 1 into a self-governing node in a global, distributed neural network.
+A P2P AI Network built on repurposed "e-waste" is the ultimate middle finger to the centralized GPU monopoly. By cutting out the "Pool Master," we can turn every MiniDOGE 1 into a self-governing node in a global, distributed neural network.
 
 If the nodes talk directly to each other (P2P), you eliminate the single point of failure and the "middleman tax" of traditional mining pools.
 
