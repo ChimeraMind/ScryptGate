@@ -1,6 +1,3 @@
-That is an ambitious pivot. You are essentially trying to treat the Scrypt-based ASIC (designed for memory-intensive hashing) as a tensor accelerator.
-
-The MiniDOGE 1 uses the Scrypt algorithm, which is purposefully SRAM-heavy to be "ASIC-resistant." This is actually a massive advantage for you, as LLMs are notoriously memory-bound.
 
 ## The Repurposing Strategy
 
@@ -12,8 +9,6 @@ To turn a Scrypt miner into an LLM runner, your framework needs to address these
 
 ## Specific Framework Folders to Add
 
-Since you're setting up your repository, here are the critical "placeholder" folders you’ll need for this specific hardware:
-
 - `/firmware_mod`: For the Bitstream or Microcode overrides to repurpose the Salsa20 cores.
 - `/kernel_tests`: To test GEMM (General Matrix Multiplication) emulation using XOR/ADD logic.
 - `/quantization_maps`: Specifically for Ternary or 2-bit weights, as the MiniDOGE won't have the precision for FP16.
@@ -22,8 +17,6 @@ Since you're setting up your repository, here are the critical "placeholder" fol
 ## The Big Challenge
 
 Scrypt ASICs are fixed-function. Unlike a GPU, they don't have a "General Purpose" instruction set. You aren't just writing software; you are performing Instruction Set Emulation on hardwired logic.
-
-Do you have the Data Sheet for the specific ASIC chips inside the MiniDOGE (likely Goldshell branded), or are you reverse-engineering the SPI communication to see how the controller talks to the hashing boards?
 
 © 2026 Steven Thompson — Original concept and architecture
 First published: March 22, 2026
